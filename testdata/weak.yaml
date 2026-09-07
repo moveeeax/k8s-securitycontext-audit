@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.27
+        - name: sidecar
+          image: busybox:1.36
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["NET_RAW", "SYS_ADMIN"]
+      initContainers:
+        - name: init
+          image: busybox:1.36

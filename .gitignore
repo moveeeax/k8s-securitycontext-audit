@@ -1,0 +1,10 @@
+# Built binary (anchored to repo root so it never matches cmd/ source dirs)
+/k8s-securitycontext-audit
+/dist/
+
+# Test and coverage artifacts
+*.out
+*.test
+
+# Keep fixtures tracked
+!testdata/**
