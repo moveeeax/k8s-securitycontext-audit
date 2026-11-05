@@ -1,7 +1,7 @@
 # k8s-securitycontext-audit
 
 [![ci](https://github.com/moveeeax/k8s-securitycontext-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/moveeeax/k8s-securitycontext-audit/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go)](https://go.dev)
+[![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Kubernetes runs your container as **root** and lets it escalate privileges
@@ -90,7 +90,7 @@ high      Deployment prod/web  sidecar      added-capability            adds Lin
   run: |
     go install github.com/moveeeax/k8s-securitycontext-audit@latest
     k8s-securitycontext-audit audit ./k8s --fail-on high --output sarif > sec.sarif
-- uses: github/codeql-action/upload-sarif@v3
+- uses: github/codeql-action/upload-sarif@v4
   with:
     sarif_file: sec.sarif
 ```
