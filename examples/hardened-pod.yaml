@@ -6,6 +6,8 @@ metadata:
 spec:
   securityContext:
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: app
       image: nginx:1.27

@@ -1,5 +1,6 @@
 // Package audit statically inspects Kubernetes manifests for missing or weak
-// securityContext settings. It never talks to a cluster: it reads YAML files
+// securityContext settings and host-level escapes (host namespaces, hostPath,
+// hostPort, seccomp). It never talks to a cluster: it reads YAML files
 // and reports findings, so it is safe in CI and pre-commit hooks.
 package audit
 
@@ -29,41 +30,57 @@ func AuditPath(path string) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	var findings []Finding
+	var (
+		findings []Finding
+		warnings []string
+	)
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", f, err)
 		}
-		fs, err := auditBytes(data, f)
+		fs, ws, err := auditBytes(data, f)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", f, err)
 		}
 		findings = append(findings, fs...)
+		warnings = append(warnings, ws...)
 	}
-	return newReport(findings), nil
+	return newReport(findings, warnings), nil
 }
 
 // AuditBytes audits a single in-memory YAML stream. label tags each finding's
 // File field (use "" for none). Exposed for tests and piped input.
 func AuditBytes(data []byte, label string) (*Report, error) {
-	fs, err := auditBytes(data, label)
+	fs, ws, err := auditBytes(data, label)
 	if err != nil {
 		return nil, err
 	}
-	return newReport(fs), nil
+	return newReport(fs, ws), nil
 }
 
-func newReport(findings []Finding) *Report {
+func newReport(findings []Finding, warnings []string) *Report {
 	sortFindings(findings)
-	summary := map[string]int{"high": 0, "medium": 0, "low": 0}
-	for _, f := range findings {
-		summary[f.SeverityName]++
-	}
 	if findings == nil {
 		findings = []Finding{}
 	}
-	return &Report{Findings: findings, Summary: summary}
+	r := &Report{Findings: findings, Warnings: warnings}
+	r.summarize()
+	return r
+}
+
+// summarize recounts active findings per severity; suppressed findings are
+// counted separately.
+func (r *Report) summarize() {
+	summary := map[string]int{"high": 0, "medium": 0, "low": 0, "suppressed": 0}
+	for _, f := range r.Findings {
+		if f.Suppressed {
+			summary["suppressed"]++
+			continue
+		}
+		summary[f.SeverityName]++
+	}
+	r.Summary = summary
 }
 
 func collectYAML(path string) ([]string, error) {
@@ -95,15 +112,18 @@ func collectYAML(path string) ([]string, error) {
 	return files, nil
 }
 
-func auditBytes(data []byte, label string) ([]Finding, error) {
-	var findings []Finding
+func auditBytes(data []byte, label string) ([]Finding, []string, error) {
+	var (
+		findings []Finding
+		warnings []string
+	)
 	for _, doc := range docSep.Split(string(data), -1) {
 		if strings.TrimSpace(doc) == "" {
 			continue
 		}
 		var r resource
 		if err := yaml.Unmarshal([]byte(doc), &r); err != nil {
-			return nil, fmt.Errorf("parse manifest: %w", err)
+			return nil, nil, fmt.Errorf("parse manifest: %w", err)
 		}
 		if r.Kind == "" {
 			continue
@@ -112,13 +132,33 @@ func auditBytes(data []byte, label string) ([]Finding, error) {
 		if !ok {
 			continue // not a workload kind
 		}
-		findings = append(findings, auditPodSpec(&r, spec, label)...)
+		fs := auditPodSpec(&r, spec, label)
+		warnings = append(warnings, applyAnnotations(&r, fs)...)
+		findings = append(findings, fs...)
 	}
-	return findings, nil
+	return findings, warnings, nil
+}
+
+func newFinding(r *resource, c *container, isInit bool, file, rule string, sev Severity, msg string) Finding {
+	f := Finding{
+		Kind:         r.Kind,
+		Namespace:    r.Metadata.Namespace,
+		Name:         r.Metadata.Name,
+		Init:         isInit,
+		Rule:         rule,
+		Severity:     sev,
+		SeverityName: sev.String(),
+		Message:      msg,
+		File:         file,
+	}
+	if c != nil {
+		f.Container = c.Name
+	}
+	return f
 }
 
 func auditPodSpec(r *resource, spec podSpec, file string) []Finding {
-	var findings []Finding
+	findings := auditPodLevel(r, spec, file)
 	for _, c := range spec.Containers {
 		findings = append(findings, auditContainer(r, spec.SecurityContext, c, false, file)...)
 	}
@@ -128,21 +168,45 @@ func auditPodSpec(r *resource, spec podSpec, file string) []Finding {
 	return findings
 }
 
+// auditPodLevel checks settings that apply to the whole pod. Its findings
+// carry an empty Container.
+func auditPodLevel(r *resource, spec podSpec, file string) []Finding {
+	var out []Finding
+	add := func(rule string, sev Severity, msg string) {
+		out = append(out, newFinding(r, nil, false, file, rule, sev, msg))
+	}
+
+	// Host namespaces (PSS baseline: hostNetwork, hostPID, hostIPC).
+	if spec.HostNetwork {
+		add("host-namespace", SeverityHigh, "pod shares the host network namespace (hostNetwork: true)")
+	}
+	if spec.HostPID {
+		add("host-namespace", SeverityHigh, "pod shares the host PID namespace (hostPID: true)")
+	}
+	if spec.HostIPC {
+		add("host-namespace", SeverityHigh, "pod shares the host IPC namespace (hostIPC: true)")
+	}
+
+	// hostPath volumes give the pod direct access to the node filesystem.
+	for _, v := range spec.Volumes {
+		if v.HostPath != nil {
+			add("host-path", SeverityHigh,
+				fmt.Sprintf("mounts hostPath %q (volume %q)", v.HostPath.Path, v.Name))
+		}
+	}
+
+	// A pod-level Unconfined profile is a PSS baseline violation even when
+	// every container overrides it.
+	if isUnconfined(podSeccomp(spec.SecurityContext)) {
+		add("seccomp-unconfined", SeverityHigh, "pod-level seccompProfile type is Unconfined")
+	}
+	return out
+}
+
 func auditContainer(r *resource, pod *podSecurityContext, c container, isInit bool, file string) []Finding {
 	var out []Finding
 	add := func(rule string, sev Severity, msg string) {
-		out = append(out, Finding{
-			Kind:         r.Kind,
-			Namespace:    r.Metadata.Namespace,
-			Name:         r.Metadata.Name,
-			Container:    c.Name,
-			Init:         isInit,
-			Rule:         rule,
-			Severity:     sev,
-			SeverityName: sev.String(),
-			Message:      msg,
-			File:         file,
-		})
+		out = append(out, newFinding(r, &c, isInit, file, rule, sev, msg))
 	}
 	sc := c.SecurityContext
 
@@ -186,7 +250,41 @@ func auditContainer(r *resource, pod *podSecurityContext, c container, isInit bo
 			"capabilities.drop does not include ALL")
 	}
 
+	// hostPort binds the container to a port on the node.
+	for _, p := range c.Ports {
+		if p.HostPort != 0 {
+			add("host-port", SeverityMedium,
+				fmt.Sprintf("binds hostPort %d (containerPort %d)", p.HostPort, p.ContainerPort))
+		}
+	}
+
+	// seccomp: the container profile wins, otherwise the pod profile applies.
+	// A pod-level Unconfined is reported once by auditPodLevel.
+	var csp *seccompProfile
+	if sc != nil && sc.SeccompProfile != nil && sc.SeccompProfile.Type != "" {
+		csp = sc.SeccompProfile
+	}
+	switch {
+	case isUnconfined(csp):
+		add("seccomp-unconfined", SeverityHigh, "seccompProfile type is Unconfined")
+	case csp == nil && podSeccomp(pod) == nil:
+		add("missing-seccomp", SeverityLow,
+			"seccompProfile is not set at container or pod level")
+	}
+
 	return out
+}
+
+// podSeccomp returns the pod-level seccomp profile, or nil when it is unset.
+func podSeccomp(pod *podSecurityContext) *seccompProfile {
+	if pod == nil || pod.SeccompProfile == nil || pod.SeccompProfile.Type == "" {
+		return nil
+	}
+	return pod.SeccompProfile
+}
+
+func isUnconfined(p *seccompProfile) bool {
+	return p != nil && p.Type == "Unconfined"
 }
 
 func runsAsNonRoot(sc *securityContext, pod *podSecurityContext) bool {
@@ -217,10 +315,11 @@ func dropsAll(sc *securityContext) bool {
 	return false
 }
 
-// FailAt reports whether the report contains any finding at or above threshold.
+// FailAt reports whether the report contains any unsuppressed finding at or
+// above threshold.
 func (r *Report) FailAt(threshold Severity) bool {
 	for _, f := range r.Findings {
-		if f.Severity >= threshold {
+		if !f.Suppressed && f.Severity >= threshold {
 			return true
 		}
 	}

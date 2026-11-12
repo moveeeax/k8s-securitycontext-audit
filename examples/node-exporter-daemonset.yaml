@@ -1,0 +1,54 @@
+# node-exporter reads host metrics, so it needs the host network and PID
+# namespaces, hostPath mounts of /proc, /sys and /, and hostPort 9100.
+# The annotations accept those findings with a reason; everything else is
+# hardened, so this manifest passes --fail-on low.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  annotations:
+    securitycontext-audit.moveeeax.io/ignore: "host-namespace,host-path"
+    securitycontext-audit.moveeeax.io/ignore.node-exporter: "host-port"
+    securitycontext-audit.moveeeax.io/reason: "node-exporter reads host /proc and /sys and serves on the node IP"
+spec:
+  selector:
+    matchLabels: {app: node-exporter}
+  template:
+    metadata:
+      labels: {app: node-exporter}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.8.2
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+          ports:
+            - name: metrics
+              containerPort: 9100
+              hostPort: 9100
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - {name: proc, mountPath: /host/proc, readOnly: true}
+            - {name: sys, mountPath: /host/sys, readOnly: true}
+            - {name: root, mountPath: /host/root, readOnly: true}
+      volumes:
+        - name: proc
+          hostPath: {path: /proc}
+        - name: sys
+          hostPath: {path: /sys}
+        - name: root
+          hostPath: {path: /}

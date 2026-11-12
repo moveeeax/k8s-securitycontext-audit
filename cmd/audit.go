@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/moveeeax/k8s-securitycontext-audit/internal/audit"
 	"github.com/spf13/cobra"
@@ -10,14 +11,17 @@ import (
 
 func newAuditCmd() *cobra.Command {
 	var (
-		output string
-		failOn string
+		output     string
+		failOn     string
+		ignoreFile string
 	)
 	c := &cobra.Command{
 		Use:   "audit [path]",
 		Short: "Audit a manifest file or a directory of manifests",
 		Long: "Audit reads a YAML file or every .yaml/.yml file under a directory " +
-			"(or stdin with '-') and reports securityContext findings.",
+			"(or stdin with '-') and reports securityContext findings. Findings can be " +
+			"suppressed with workload annotations or --ignore-file; suppressed findings " +
+			"stay in the output but do not count toward --fail-on.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := "-"
@@ -26,9 +30,15 @@ func newAuditCmd() *cobra.Command {
 			}
 
 			var (
-				report *audit.Report
-				err    error
+				report  *audit.Report
+				ignores *audit.IgnoreFile
+				err     error
 			)
+			if ignoreFile != "" {
+				if ignores, err = audit.LoadIgnoreFile(ignoreFile); err != nil {
+					return fmt.Errorf("--ignore-file: %w", err)
+				}
+			}
 			if path == "-" {
 				var data []byte
 				data, err = io.ReadAll(cmd.InOrStdin())
@@ -40,6 +50,12 @@ func newAuditCmd() *cobra.Command {
 			}
 			if err != nil {
 				return err
+			}
+			if ignores != nil {
+				report.ApplyIgnoreFile(ignores, time.Now())
+			}
+			for _, warn := range report.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", warn)
 			}
 
 			w := cmd.OutOrStdout()
@@ -72,6 +88,7 @@ func newAuditCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVarP(&output, "output", "o", "table", "output format: table, json, sarif")
+	c.Flags().StringVar(&ignoreFile, "ignore-file", "", "YAML file of accepted findings (kind, namespace, name, container, ignore, reason, expires)")
 	c.Flags().StringVar(&failOn, "fail-on", "", "exit non-zero if any finding is at or above this severity: high, medium, low")
 	return c
 }
