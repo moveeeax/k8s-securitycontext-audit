@@ -21,7 +21,8 @@ func newRootCmd() *cobra.Command {
 		Short: "Statically audit Kubernetes manifests for weak securityContext settings",
 		Long: "k8s-securitycontext-audit reads Kubernetes YAML and reports containers " +
 			"that run as root, run privileged, allow privilege escalation, use a writable " +
-			"root filesystem, or add dangerous Linux capabilities. It never talks to a cluster.",
+			"root filesystem, add dangerous Linux capabilities, share host namespaces, mount " +
+			"hostPath volumes, bind hostPorts, or run without a seccomp profile. It never talks to a cluster.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

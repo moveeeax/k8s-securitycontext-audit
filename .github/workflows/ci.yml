@@ -48,3 +48,5 @@ jobs:
           fi
       - name: Audit hardened example (must pass)
         run: ./k8s-securitycontext-audit audit examples/hardened-pod.yaml --fail-on low
+      - name: Audit annotated node-exporter example (suppressions must pass)
+        run: ./k8s-securitycontext-audit audit examples/node-exporter-daemonset.yaml --fail-on low

@@ -54,6 +54,15 @@ type sarifResult struct {
 	Level     string          `json:"level"`
 	Message   sarifText       `json:"message"`
 	Locations []sarifLocation `json:"locations,omitempty"`
+	// Suppressions is set only for suppressed findings (SARIF 2.1.0 §3.27.23).
+	Suppressions []sarifSuppression `json:"suppressions,omitempty"`
+}
+
+type sarifSuppression struct {
+	// Kind is "inSource" (manifest annotation) or "external" (ignore file).
+	Kind          string `json:"kind"`
+	Status        string `json:"status"`
+	Justification string `json:"justification"`
 }
 
 type sarifLocation struct {
@@ -89,7 +98,7 @@ func (r *Report) WriteSARIF(w io.Writer, version string) error {
 			ruleSet[f.Rule] = sarifRule{
 				ID:               f.Rule,
 				Name:             f.Rule,
-				ShortDescription: sarifText{Text: f.Message},
+				ShortDescription: sarifText{Text: ruleDescriptions[f.Rule]},
 				Properties:       sarifRuleProps{Tags: []string{"security", "kubernetes"}},
 				DefaultConfig:    sarifDefaultConfig{Level: sarifLevel(f.Severity)},
 			}
@@ -98,6 +107,17 @@ func (r *Report) WriteSARIF(w io.Writer, version string) error {
 			RuleID:  f.Rule,
 			Level:   sarifLevel(f.Severity),
 			Message: sarifText{Text: resourceRef(f) + " / " + containerRef(f) + ": " + f.Message},
+		}
+		if f.Suppressed && f.Suppression != nil {
+			kind := "external"
+			if f.Suppression.Source == SourceAnnotation {
+				kind = "inSource"
+			}
+			res.Suppressions = []sarifSuppression{{
+				Kind:          kind,
+				Status:        "accepted",
+				Justification: f.Suppression.Reason,
+			}}
 		}
 		if f.File != "" {
 			res.Locations = []sarifLocation{{
@@ -131,14 +151,4 @@ func (r *Report) WriteSARIF(w io.Writer, version string) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(log)
-}
-
-// ruleOrder gives SARIF rules a stable ordering.
-var ruleOrder = []string{
-	"run-as-root",
-	"privileged",
-	"added-capability",
-	"allow-privilege-escalation",
-	"writable-root-filesystem",
-	"missing-drop-all",
 }
